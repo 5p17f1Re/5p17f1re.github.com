@@ -273,7 +273,8 @@ html[data-case-cover-motion-direction="return"] .view-layer--current .projects {
 /* The route-local cover stays hidden for the entire forward transition,
    including handoff. The persistent target image is the only visible cover;
    the route-local image is revealed on the first idle frame after it unmounts. */
-html[data-case-cover-motion-direction="forward"] [data-case-cover-role="target"] {
+html[data-case-cover-motion-direction="forward"]
+  [data-case-cover-role="target"][data-case-cover-motion] {
   opacity: 0;
 }
 
@@ -311,7 +312,9 @@ html[data-case-cover-motion-direction="forward"] .case-title h1 {
   );
 }
 
-html[data-case-cover-motion-direction="forward"] .case-page-shell .case-text {
+/* Reveal every body block from the same root timeline. The hero cover is not
+   part of .case-content: it remains owned by the persistent transition layer. */
+html[data-case-cover-motion-direction="forward"] .case-page-shell .case-content > * {
   opacity: var(--case-cover-motion-copy-opacity, 0);
   filter: blur(var(--case-cover-motion-copy-blur, 12px));
 }

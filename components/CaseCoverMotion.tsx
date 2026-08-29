@@ -40,37 +40,43 @@ type ActiveTransition = TransitionSnapshot & {
 };
 
 const storageKey = "case-cover-motion-snapshot";
-// Keep the forward card-to-case motion at the slower test-environment cadence
-// in every build. The return transition deliberately keeps its separate
-// canonical timing below.
-const forwardMotionScale = 1.5;
-const forwardSpeedScale = 0.46;
-const forwardTakeoffMs = Math.round(520 * forwardSpeedScale * forwardMotionScale);
-const forwardLandingMs = Math.round(600 * forwardSpeedScale * forwardMotionScale);
+// Forward motion is intentionally shorter than the separate canonical return.
+const forwardTakeoffMs = 280;
+const forwardLandingMs = 360;
 const forwardMotionMs = forwardTakeoffMs + forwardLandingMs;
 const forwardNavigationDelayMs = 16;
 const forwardPreparationTimeoutMs = 240;
 const forwardPreparationAttempts = 12;
 const forwardFallbackMs = 180;
+// Let the persistent cover establish visible motion before its asset changes.
+// Swapping while its rect is still identical to the homepage card reads as a
+// blink when the card and case covers are different images.
+const forwardCoverFadeStartMs = 64;
 const forwardCoverFadeMs = 80;
 const returnOffscreenMotionMs = 450;
 const returnCoverLandingMs = 480;
 const returnLandingMs = 520;
 const returnNavigationDelayMs = 16;
-const forwardHandoffBufferMs = Math.round(16 * forwardMotionScale);
+const forwardHandoffBufferMs = 16;
 const forwardTotalMs =
-  forwardCoverFadeMs + forwardMotionMs + forwardHandoffBufferMs;
+  forwardMotionMs + forwardHandoffBufferMs;
 const forwardEase = [0.16, 1, 0.3, 1] as const;
 const forwardRevealEase = [0.4, 0, 0.2, 1] as const;
-const forwardTakeoffProgress = forwardTakeoffMs / forwardMotionMs;
+// Keep the copy and body reveal proportionally ahead of the cover's finish,
+// so it reads as one landing rather than a second delayed event.
+const forwardContentRevealLeadMs = 112;
+const forwardContentRevealStartMs =
+  forwardTakeoffMs - forwardContentRevealLeadMs;
+const forwardContentRevealDurationMs = forwardLandingMs;
 const returnEase = [0.12, 1, 0.2, 1] as const;
 
 function getForwardRevealProgress(rawProgress: number): number {
   const progress = Math.min(1, Math.max(0, rawProgress));
-  const landingProgress =
-    (progress - forwardTakeoffProgress) / (1 - forwardTakeoffProgress);
+  const elapsedMs = progress * forwardMotionMs;
+  const contentRevealProgress =
+    (elapsedMs - forwardContentRevealStartMs) / forwardContentRevealDurationMs;
 
-  return cubicBezierProgress(landingProgress, forwardRevealEase);
+  return cubicBezierProgress(contentRevealProgress, forwardRevealEase);
 }
 
 function writeMotionTimelineVars(
@@ -445,7 +451,7 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
         direction: "forward",
         phase: "preflight",
       });
-      armFallback(forwardPreparationTimeoutMs + forwardFallbackMs + 80);
+      armFallback(forwardPreparationTimeoutMs + forwardFallbackMs);
       armNavigation(
         () => router.push(snapshot.casePath, { scroll: false }),
         forwardNavigationDelayMs,
@@ -924,7 +930,7 @@ function CaseCoverTransitionLayer({
     const updateMotion = () => {
       const elapsed = Math.max(0, Date.now() - startedAt);
       const progress = isForwardTransition && !isFallback
-        ? Math.min(1, Math.max(0, (elapsed - forwardCoverFadeMs) / forwardMotionMs))
+        ? Math.min(1, elapsed / forwardMotionMs)
         : Math.min(1, elapsed / durationMs);
       const easedProgress = cubicBezierProgress(progress, ease);
       const coverProgress =
@@ -1055,7 +1061,10 @@ function CaseCoverTransitionLayer({
 
     const updateContentCrossfade = () => {
       const elapsed = Math.max(0, Date.now() - startedAt);
-      const progress = Math.min(1, elapsed / forwardCoverFadeMs);
+      const progress = Math.min(
+        1,
+        Math.max(0, (elapsed - forwardCoverFadeStartMs) / forwardCoverFadeMs),
+      );
       const opacity = cubicBezierProgress(progress, forwardRevealEase);
       if (sourceContentRef.current) {
         sourceContentRef.current.style.opacity = String(1 - opacity);
@@ -1126,14 +1135,18 @@ export function SharedCaseCover({
   const coverRef = useRef<HTMLDivElement>(null);
   const isActiveCover = active?.transitionId === transitionId;
   const participates = Boolean(transitionId) && enabled && isActiveCover;
-  // The homepage cover is the same content already held by the persistent
-  // layer. Keep it mounted and visible as soon as home mounts on return; the
-  // fixed layer remains above it until handoff, so there is no first-paint
-  // replacement at the end of the flight.
+  // Keep the homepage source visible through forward preflight: the fixed
+  // layer mounts at the same rect in that phase, then becomes its owner as
+  // landing begins. This prevents a compositor gap exactly at click time.
+  // On return, the real cover remains visible under the fixed layer until
+  // handoff, so there is no final-frame replacement at the end of the flight.
   const isReturnCover = !target && active?.direction === "return";
+  const isForwardPreflight =
+    active?.direction === "forward" && active.phase === "preflight";
   const isHiddenByTransition =
     participates &&
-    !isReturnCover;
+    !isReturnCover &&
+    !isForwardPreflight;
 
   useLayoutEffect(() => {
     if (!transitionId || !enabled) return;
