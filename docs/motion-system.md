@@ -126,7 +126,7 @@ DOM: canvas не может сдвинуть цель под летящей об
 Для возврата с первого экрана route handoff задержан только на `16 ms` — один
 кадр для blur outgoing case shell. С этого же старта homepage canvas идёт одним
 полотном из `opacity: 0.33`, `blur(18px)`, `scale(.94)` в `opacity: 1`,
-`blur(0)`, `scale(1)`, пока cover мягко приземляется за `400 ms`.
+`blur(0)`, `scale(1)`, пока cover мягко приземляется за `250 ms`.
 Cover сохраняет быстрый iOS-like `cubic-bezier(0.12, 1, 0.2, 1)`, а opacity,
 blur canvas использует более ровный `cubic-bezier(0.4, 0, 0.6, 1)`: blur не
 исчезает в первой половине возврата. Масштаб canvas без overshoot сразу идёт
@@ -144,7 +144,7 @@ animation frame, когда её layout и выбранный view уже при
 scroll блокируется: пользователь не может сдвинуть homepage под fixed cover,
 пока тот ещё летит. Глобальный `scroll-behavior: smooth` также отключён, чтобы
 восстановление было дискретным и не продолжало двигать раскладку после handoff.
-Handoff через `400 ms` только переключает видимость слоя и не
+Handoff через `250 ms` только переключает видимость слоя и не
 перезапускает движение.
 
 Пока route кейса монтируется и target rect стабилизируется, `.case-page-shell`
@@ -169,18 +169,24 @@ rect не устаревал от ручного скролла. Во forward bl
 `280/360 ms`; target начинает fade через `64 ms` после старта полёта и остаётся
 его геометрическим владельцем до handoff.
 Геометрия cover сохраняет canonical return easing без overshoot: cover и canvas
-сразу приходят к точной целевой геометрии. Для offscreen-return в Birdview, где
-нет видимого исходного rect, persistent cover начинает в центре карточки с
-`scale(1.04)` и спокойно сходит к `scale(1)` за те же `400 ms`; это даёт
-минимальное движение вместо неподвижного появления. Snakeview этот fallback не
-использует. Возврат на главную сохраняет canonical geometry `400/416 ms`; homepage cover остаётся непрозрачной в persistent layer,
+сразу приходят к точной целевой геометрии. Для offscreen-return в Birdview и
+Snakeview, где нет видимого исходного rect, persistent cover начинает в центре
+карточки с `scale(1.08)` и приходит к `scale(1)` за `180 ms` с быстрым
+`cubic-bezier(0.12, 1, 0.2, 1)`, таким же, как у обычного прилёта cover. Этот
+offscreen clock запускается после одного
+отрисованного кадра homepage, а не на исходном route кейса: сначала виден
+returned canvas с исходным масштабом cover, затем начинается landing. Так
+мобильная навигация не съедает видимую часть движения; это даёт
+минимальное движение вместо неподвижного появления. Возврат на главную
+сохраняет canonical geometry `250/266 ms` для видимой обложки и `180/196 ms`
+для offscreen-return; homepage cover остаётся непрозрачной в persistent layer,
 а route-local cover скрыта до точного handoff. Поэтому возврат не создаёт
 двойную картинку, прозрачную дыру или мигание.
 
 ### Возврат на главную
 
 Этот переход — canonical motion reference сайта: плавное приземление карточки,
-синхронное снятие blur и мягкое появление контента. Landing cover длится `400 ms`
+синхронное снятие blur и мягкое появление контента. Landing cover длится `250 ms`
 с `cubic-bezier(0.12, 1, 0.2, 1)`. Весь остальной первый экран появляется за ту
 же длину, но с ровным `cubic-bezier(0.4, 0, 0.6, 1)` для opacity и blur: canvas
 `scale(.94 → 1)`, `opacity(.33 → 1)`, `filter: blur(18px → 0)`, outgoing case shell —
@@ -195,8 +201,9 @@ persistent cover не достигнет той же geometry. Поэтому о
 полотна рассчитывается в центре viewport, а не в центре длинного scroll-полотна.
 
 Если обложка кейса вне viewport, используется локальный fallback активной
-карточки: persistent homepage-cover показывается сразу без отдельного полёта,
-а общий landing полотна продолжается за `400 ms` с тем же canvas reveal.
+карточки: persistent homepage-cover начинает с `scale(1.08)` и за `180 ms`
+приходит к `scale(1)` с быстрым cover ease-out — одинаково в Birdview и
+Snakeview, без отдельного полёта через весь экран.
 
 ## Карта владения
 

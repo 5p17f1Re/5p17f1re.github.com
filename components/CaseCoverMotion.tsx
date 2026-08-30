@@ -35,6 +35,7 @@ type ActiveTransition = TransitionSnapshot & {
   direction: Direction;
   phase: TransitionPhase;
   offscreenReturn?: boolean;
+  offscreenMotionStartedAt?: number;
   takeoffStartedAt?: number;
   destinationCoverRect?: CoverRectSnapshot;
 };
@@ -53,12 +54,15 @@ const forwardFallbackMs = 180;
 // blink when the card and case covers are different images.
 const forwardCoverFadeStartMs = 64;
 const forwardCoverFadeMs = 80;
-const returnOffscreenMotionMs = 400;
-const returnCoverLandingMs = 400;
+const returnOffscreenMotionMs = 180;
+const returnCoverLandingMs = 250;
 const returnHandoffBufferMs = 16;
 const returnLandingMs = returnCoverLandingMs + returnHandoffBufferMs;
+const returnOffscreenLandingMs =
+  returnOffscreenMotionMs + returnHandoffBufferMs;
 const returnNavigationDelayMs = 16;
-const birdviewOffscreenReturnStartScale = 1.04;
+const returnOffscreenFallbackMs = 1000;
+const offscreenReturnStartScale = 1.08;
 const forwardHandoffBufferMs = 16;
 const forwardTotalMs =
   forwardMotionMs + forwardHandoffBufferMs;
@@ -177,7 +181,6 @@ function getCoverTransform(
   destination: CoverRectSnapshot,
   progress: number,
 ): string {
-  // Allow a tiny return-only overshoot for the barely visible settle.
   const eased = Math.max(0, progress);
   const initialScaleX = source.width / destination.width;
   const initialScaleY = source.height / destination.height;
@@ -218,12 +221,12 @@ function cubicBezierProgress(
   );
 }
 
-function getBirdviewOffscreenReturnTransform(
+function getOffscreenReturnTransform(
   rect: CoverRectSnapshot,
   progress: number,
 ): string {
   const scale =
-    1 + (birdviewOffscreenReturnStartScale - 1) * (1 - progress);
+    1 + (offscreenReturnStartScale - 1) * (1 - progress);
   const offsetX = -((rect.width * (scale - 1)) / 2);
   const offsetY = -((rect.height * (scale - 1)) / 2);
   return `translate3d(${offsetX}px, ${offsetY}px, 0) scale(${scale})`;
@@ -528,18 +531,11 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
       takeoffStartedAt: Date.now(),
       destinationCoverRect: snapshot.sourceCoverRect,
     });
-    armFallback(returnLandingMs);
-    if (offscreenReturn) {
-      armNavigation(
-        () => router.push(snapshot.homePath, { scroll: false }),
-        returnNavigationDelayMs,
-      );
-    } else {
-      armNavigation(
-        () => router.push(snapshot.homePath, { scroll: false }),
-        returnNavigationDelayMs,
-      );
-    }
+    armFallback(offscreenReturn ? returnOffscreenFallbackMs : returnLandingMs);
+    armNavigation(
+      () => router.push(snapshot.homePath, { scroll: false }),
+      returnNavigationDelayMs,
+    );
     return true;
   }, [armFallback, armNavigation, pathname, reduceMotion, router, setTransition]);
 
@@ -571,7 +567,7 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
         destinationCoverRect: snapshot.sourceCoverRect,
         offscreenReturn: true,
       });
-      armFallback(returnLandingMs);
+      armFallback(returnOffscreenFallbackMs);
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
@@ -596,6 +592,8 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
       window.scrollTo({ top: active.scrollY, behavior: "instant" });
       let secondFrame = 0;
       let thirdFrame = 0;
+      let startMotionFrame = 0;
+      let visualMotionFrame = 0;
       const restoreAfterLayout = () => {
         window.scrollTo({ top: active.scrollY, behavior: "instant" });
         thirdFrame = window.requestAnimationFrame(() => {
@@ -603,12 +601,37 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
         });
       };
       secondFrame = window.requestAnimationFrame(restoreAfterLayout);
+      // Let the returned homepage paint one whole frame with the cover at
+      // its start scale. Otherwise a mobile route handoff consumes the first
+      // part of the landing against the outgoing case and makes the cover
+      // appear static when the blurred homepage becomes visible.
+      if (active.offscreenReturn && !active.offscreenMotionStartedAt) {
+        startMotionFrame = window.requestAnimationFrame(() => {
+          visualMotionFrame = window.requestAnimationFrame(() => {
+            const latest = activeRef.current;
+            if (
+              latest?.transitionId === active.transitionId &&
+              latest.direction === "return" &&
+              latest.offscreenReturn &&
+              !latest.offscreenMotionStartedAt
+            ) {
+              setTransition({
+                ...latest,
+                offscreenMotionStartedAt: Date.now(),
+              });
+              armFallback(returnOffscreenLandingMs);
+            }
+          });
+        });
+      }
       return () => {
         window.cancelAnimationFrame(secondFrame);
         window.cancelAnimationFrame(thirdFrame);
+        window.cancelAnimationFrame(startMotionFrame);
+        window.cancelAnimationFrame(visualMotionFrame);
       };
     }
-  }, [active, pathname]);
+  }, [active, armFallback, pathname, setTransition]);
 
   useLayoutEffect(() => {
     const current = activeRef.current;
@@ -860,10 +883,9 @@ function CaseCoverTransitionLayer({
   replacementContent: ReactNode | null;
 }) {
   const { active } = useCaseCoverMotion();
+  const pathname = usePathname();
   const isOffscreenReturn =
     active?.direction === "return" && Boolean(active.offscreenReturn);
-  const isBirdviewOffscreenReturn =
-    isOffscreenReturn && active?.view === "birdview";
   const destinationRect = active?.destinationCoverRect;
   const sourceRect = isOffscreenReturn
     ? destinationRect
@@ -880,6 +902,8 @@ function CaseCoverTransitionLayer({
   const activeDirection = active?.direction;
   const activeTransitionId = active?.transitionId;
   const activePhase = active?.phase;
+  const activeHomePath = active?.homePath;
+  const activeOffscreenMotionStartedAt = active?.offscreenMotionStartedAt;
   const activeTakeoffStartedAt = active?.takeoffStartedAt;
   const animationTargetRect = destinationRect;
   const layoutRect = destinationRect ?? sourceRect;
@@ -934,11 +958,31 @@ function CaseCoverTransitionLayer({
       layer.style.transform = "none";
       return;
     }
+    const isHomeReturnRoute =
+      activeDirection === "return" &&
+      activeHomePath !== undefined &&
+      pathname.replace(/\/$/, "") === activeHomePath.replace(/\/$/, "");
+    if (
+      isOffscreenReturn &&
+      (!isHomeReturnRoute || activeOffscreenMotionStartedAt === undefined)
+    ) {
+      writeMotionTimelineVars("return", 0, 0);
+      if (animationTargetRect) {
+        layer.style.transform = getOffscreenReturnTransform(
+          animationTargetRect,
+          0,
+        );
+        layer.style.opacity = "1";
+      }
+      return;
+    }
     if (!isForwardTransition && !animationTargetRect) return;
 
     const startedAt = isForwardTransition
       ? (forwardMotionStartedAtRef.current ??= Date.now())
-      : (activeTakeoffStartedAt ?? Date.now());
+      : isOffscreenReturn
+        ? (activeOffscreenMotionStartedAt ?? Date.now())
+        : (activeTakeoffStartedAt ?? Date.now());
     const durationMs = isFallback
       ? forwardFallbackMs
       : isOffscreenReturn
@@ -955,6 +999,7 @@ function CaseCoverTransitionLayer({
         ? Math.min(1, elapsed / forwardMotionMs)
         : Math.min(1, elapsed / durationMs);
       const easedProgress = cubicBezierProgress(progress, ease);
+      const offscreenReturnProgress = cubicBezierProgress(progress, returnEase);
       writeMotionTimelineVars(
         isForwardTransition ? "forward" : "return",
         easedProgress,
@@ -964,10 +1009,10 @@ function CaseCoverTransitionLayer({
         layer.style.transform = "none";
         layer.style.opacity = String(1 - easedProgress);
       } else if (animationTargetRect) {
-        layer.style.transform = isBirdviewOffscreenReturn
-          ? getBirdviewOffscreenReturnTransform(
+        layer.style.transform = isOffscreenReturn
+          ? getOffscreenReturnTransform(
               animationTargetRect,
-              easedProgress,
+              offscreenReturnProgress,
             )
           : getCoverTransform(sourceRect, animationTargetRect, easedProgress);
         layer.style.opacity = "1";
@@ -986,8 +1031,10 @@ function CaseCoverTransitionLayer({
     activeTakeoffStartedAt,
     activeTransitionId,
     animationTargetRect,
-    isBirdviewOffscreenReturn,
     isOffscreenReturn,
+    activeHomePath,
+    activeOffscreenMotionStartedAt,
+    pathname,
     targetReady,
     sourceRect,
     sourceRect?.height,
