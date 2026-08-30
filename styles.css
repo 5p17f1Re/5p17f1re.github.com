@@ -173,6 +173,13 @@ html[data-case-cover-motion-active][data-case-cover-motion-direction="forward"][
    restored as soon as the transition attributes are removed. */
 html[data-case-cover-motion-active][data-case-cover-motion-direction="return"] {
   scroll-behavior: auto;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+html[data-case-cover-motion-active][data-case-cover-motion-direction="return"] body {
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 .shared-case-cover {
@@ -203,6 +210,13 @@ html[data-case-cover-motion-active][data-case-cover-motion-direction="return"] {
   backdrop-filter: blur(var(--case-cover-motion-context-blur, 0px));
   -webkit-backdrop-filter: blur(var(--case-cover-motion-context-blur, 0px));
   will-change: opacity, backdrop-filter;
+}
+
+/* Return uses a real filter on the homepage canvas below. Applying a second
+   backdrop blur here makes the scale/balance harder to read. */
+html[data-case-cover-motion-direction="return"] .case-cover-motion-backdrop {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .case-cover-motion-layer__content,
@@ -268,6 +282,14 @@ html[data-case-cover-motion-direction="forward"] .view-layer--current .projects,
 html[data-case-cover-motion-direction="return"] .view-layer--current .projects {
   opacity: var(--case-cover-motion-context-opacity, 1);
   transform: scale(var(--case-cover-motion-context-scale, 1));
+}
+
+/* A backdrop filter only softens what sits behind it, which made return blur
+   almost invisible. Blur the homepage canvas itself for this short 400 ms
+   return so it resolves in lockstep with the canvas scale. */
+html[data-case-cover-motion-direction="return"] .view-layer--current .projects {
+  filter: blur(var(--case-cover-motion-context-blur, 0px));
+  will-change: transform, opacity, filter;
 }
 
 /* The route-local cover stays hidden for the entire forward transition,

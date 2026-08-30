@@ -53,10 +53,12 @@ const forwardFallbackMs = 180;
 // blink when the card and case covers are different images.
 const forwardCoverFadeStartMs = 64;
 const forwardCoverFadeMs = 80;
-const returnOffscreenMotionMs = 450;
-const returnCoverLandingMs = 480;
-const returnLandingMs = 520;
+const returnOffscreenMotionMs = 400;
+const returnCoverLandingMs = 400;
+const returnHandoffBufferMs = 16;
+const returnLandingMs = returnCoverLandingMs + returnHandoffBufferMs;
 const returnNavigationDelayMs = 16;
+const birdviewOffscreenReturnStartScale = 1.04;
 const forwardHandoffBufferMs = 16;
 const forwardTotalMs =
   forwardMotionMs + forwardHandoffBufferMs;
@@ -69,6 +71,9 @@ const forwardContentRevealStartMs =
   forwardTakeoffMs - forwardContentRevealLeadMs;
 const forwardContentRevealDurationMs = forwardLandingMs;
 const returnEase = [0.12, 1, 0.2, 1] as const;
+// The cover lands with the quick iOS-like ease, while the surrounding canvas
+// keeps its blur readable until the end of the same landing window.
+const returnContextEase = [0.4, 0, 0.6, 1] as const;
 
 function getForwardRevealProgress(rawProgress: number): number {
   const progress = Math.min(1, Math.max(0, rawProgress));
@@ -117,25 +122,27 @@ function writeMotionTimelineVars(
     return;
   }
 
+  const contextProgress = cubicBezierProgress(rawProgress, returnContextEase);
+  const coverProgress = cubicBezierProgress(rawProgress, returnEase);
   root.style.setProperty(
     "--case-cover-motion-context-opacity",
-    String(0.33 + 0.67 * progress),
+    String(0.33 + 0.67 * contextProgress),
   );
   root.style.setProperty(
     "--case-cover-motion-context-blur",
-    `${12 * (1 - progress)}px`,
+    `${18 * (1 - contextProgress)}px`,
   );
   root.style.setProperty(
     "--case-cover-motion-context-scale",
-    String(0.9 + 0.1 * progress),
+    String(0.94 + 0.06 * coverProgress),
   );
   root.style.setProperty(
     "--case-cover-motion-outgoing-opacity",
-    String(1 - 0.4 * progress),
+    String(1 - 0.4 * contextProgress),
   );
   root.style.setProperty(
     "--case-cover-motion-outgoing-blur",
-    `${12 * progress}px`,
+    `${12 * contextProgress}px`,
   );
 }
 
@@ -211,15 +218,15 @@ function cubicBezierProgress(
   );
 }
 
-function getSubtleReturnProgress(progress: number): number {
-  const clamped = Math.min(1, Math.max(0, progress));
-  const eased = cubicBezierProgress(clamped, returnEase);
-  if (clamped < 0.74) return eased;
-
-  const settleProgress = (clamped - 0.74) / 0.26;
-  const settle =
-    Math.sin(settleProgress * Math.PI * 2) * 0.006 * (1 - settleProgress);
-  return eased + settle;
+function getBirdviewOffscreenReturnTransform(
+  rect: CoverRectSnapshot,
+  progress: number,
+): string {
+  const scale =
+    1 + (birdviewOffscreenReturnStartScale - 1) * (1 - progress);
+  const offsetX = -((rect.width * (scale - 1)) / 2);
+  const offsetY = -((rect.height * (scale - 1)) / 2);
+  return `translate3d(${offsetX}px, ${offsetY}px, 0) scale(${scale})`;
 }
 
 type CaseCoverMotionContextValue = {
@@ -307,6 +314,9 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
   const [replacementContent, setReplacementContent] =
     useState<ReactNode | null>(null);
   const activeRef = useRef<ActiveTransition | null>(null);
+  // The provider survives the client route handoff, so this is the reliable
+  // primary return snapshot. sessionStorage remains the reload/back fallback.
+  const lastSnapshotRef = useRef<TransitionSnapshot | null>(null);
   const coverContentRegistryRef = useRef(
     new Map<string, { source?: ReactNode; target?: ReactNode }>(),
   );
@@ -384,7 +394,10 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
     setTransition(null);
     setTransitionContent(null);
     setReplacementContent(null);
-    if (completed?.direction === "return") removeSnapshot();
+    if (completed?.direction === "return") {
+      lastSnapshotRef.current = null;
+      removeSnapshot();
+    }
   }, [setTransition]);
 
   const armNavigation = useCallback(
@@ -437,6 +450,7 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
         scrollY: window.scrollY,
         sourceCoverRect: snapshotCoverRect(coverRect),
       };
+      lastSnapshotRef.current = nextSnapshot;
       setTransitionContent(
         coverContentRegistryRef.current.get(snapshot.transitionId)?.source ??
           null,
@@ -466,8 +480,14 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
       event.preventDefault();
       return true;
     }
-    const snapshot = readSnapshot();
-    if (!snapshot || reduceMotion) return false;
+    const snapshot = lastSnapshotRef.current ?? readSnapshot();
+    if (
+      !snapshot ||
+      reduceMotion ||
+      pathname.replace(/\/$/, "") !== snapshot.casePath.replace(/\/$/, "")
+    ) {
+      return false;
+    }
 
     event.preventDefault();
     const cover = getVisibleCover(snapshot.transitionId, "target");
@@ -478,10 +498,10 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
     // When the case cover is still in the viewport, preserve the canonical
     // return flight from that rect into the saved homepage card. Deep-scroll
     // exits keep the no-flight fallback because their source is not visible.
-    const offscreenReturn = Boolean(
-      coverRect &&
-        (coverRect.bottom < 0 || coverRect.top > window.innerHeight),
-    );
+    const offscreenReturn =
+      !coverRect ||
+      coverRect.bottom < 0 ||
+      coverRect.top > window.innerHeight;
 
     document.documentElement.dataset.portfolioView = snapshot.view;
     try {
@@ -521,11 +541,11 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
       );
     }
     return true;
-  }, [armFallback, armNavigation, reduceMotion, router, setTransition]);
+  }, [armFallback, armNavigation, pathname, reduceMotion, router, setTransition]);
 
   useEffect(() => {
     const handlePopState = () => {
-      const snapshot = readSnapshot();
+      const snapshot = lastSnapshotRef.current ?? readSnapshot();
       if (!snapshot || activeRef.current || reduceMotion) return;
       if (
         window.location.pathname.replace(/\/$/, "") !==
@@ -675,7 +695,7 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
           ) {
             setTransition({ ...latest, phase: "handoff" });
           }
-        }, returnCoverLandingMs + 32);
+        }, returnCoverLandingMs);
       }
       return;
     }
@@ -740,7 +760,7 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
           if (handoffTimerRef.current !== null) {
             window.clearTimeout(handoffTimerRef.current);
           }
-          // Reveal the homepage cover just after the 350 ms cover landing,
+          // Reveal the homepage cover at the end of the 400 ms cover landing,
           // while the persistent layer is still present. This makes the
           // handoff overlap instead of exposing a final-frame geometry gap.
           handoffTimerRef.current = window.setTimeout(() => {
@@ -753,7 +773,7 @@ export function CaseCoverMotionProvider({ children }: { children: ReactNode }) {
             ) {
               setTransition({ ...latest, phase: "handoff" });
             }
-          }, returnCoverLandingMs + 32);
+          }, returnCoverLandingMs);
         }
         armFallback(
           current.direction === "forward"
@@ -842,6 +862,8 @@ function CaseCoverTransitionLayer({
   const { active } = useCaseCoverMotion();
   const isOffscreenReturn =
     active?.direction === "return" && Boolean(active.offscreenReturn);
+  const isBirdviewOffscreenReturn =
+    isOffscreenReturn && active?.view === "birdview";
   const destinationRect = active?.destinationCoverRect;
   const sourceRect = isOffscreenReturn
     ? destinationRect
@@ -933,10 +955,6 @@ function CaseCoverTransitionLayer({
         ? Math.min(1, elapsed / forwardMotionMs)
         : Math.min(1, elapsed / durationMs);
       const easedProgress = cubicBezierProgress(progress, ease);
-      const coverProgress =
-        !isForwardTransition && !isOffscreenReturn && !isFallback
-          ? getSubtleReturnProgress(progress)
-          : easedProgress;
       writeMotionTimelineVars(
         isForwardTransition ? "forward" : "return",
         easedProgress,
@@ -946,11 +964,12 @@ function CaseCoverTransitionLayer({
         layer.style.transform = "none";
         layer.style.opacity = String(1 - easedProgress);
       } else if (animationTargetRect) {
-        layer.style.transform = getCoverTransform(
-          sourceRect,
-          animationTargetRect,
-          coverProgress,
-        );
+        layer.style.transform = isBirdviewOffscreenReturn
+          ? getBirdviewOffscreenReturnTransform(
+              animationTargetRect,
+              easedProgress,
+            )
+          : getCoverTransform(sourceRect, animationTargetRect, easedProgress);
         layer.style.opacity = "1";
       }
 
@@ -967,6 +986,7 @@ function CaseCoverTransitionLayer({
     activeTakeoffStartedAt,
     activeTransitionId,
     animationTargetRect,
+    isBirdviewOffscreenReturn,
     isOffscreenReturn,
     targetReady,
     sourceRect,
@@ -1138,15 +1158,18 @@ export function SharedCaseCover({
   // Keep the homepage source visible through forward preflight: the fixed
   // layer mounts at the same rect in that phase, then becomes its owner as
   // landing begins. This prevents a compositor gap exactly at click time.
-  // On return, the real cover remains visible under the fixed layer until
-  // handoff, so there is no final-frame replacement at the end of the flight.
-  const isReturnCover = !target && active?.direction === "return";
+  // On return, hide the route-local card cover while the persistent cover
+  // lands over the black canvas. Reveal it only once both geometries match.
+  const isReturnCoverAtHandoff =
+    !target &&
+    active?.direction === "return" &&
+    active.phase === "handoff";
   const isForwardPreflight =
     active?.direction === "forward" && active.phase === "preflight";
   const isHiddenByTransition =
     participates &&
-    !isReturnCover &&
-    !isForwardPreflight;
+    !isForwardPreflight &&
+    !isReturnCoverAtHandoff;
 
   useLayoutEffect(() => {
     if (!transitionId || !enabled) return;
