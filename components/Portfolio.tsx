@@ -940,6 +940,7 @@ function SnakeView({
             locale={locale}
             localeTextTransitionId={localeTextTransitionId}
             text={text}
+            eager={index === 0}
             view="snakeview"
             sharedCoverEnabled={sharedCoverEnabled}
           />
